@@ -130,7 +130,7 @@ static const uint8_t font5x8[] = {
     0x40,0x20,0x10,0x20,0x40,0x00,0xF8,0x00, 0x10,0x20,0x40,0x20,0x10,0x00,0xF8,0x00, // 0xF2, 0xF3
     0x38,0x28,0x20,0x20,0x20,0x20,0x20,0x20, 0x20,0x20,0x20,0x20,0x20,0xA0,0xA0,0xE0, // 0xF4, 0xF5
     0x30,0x30,0x00,0xF8,0x00,0x30,0x30,0x00, 0x00,0xE8,0xB8,0x00,0xE8,0xB8,0x00,0x00, // 0xF6, 0xF7
-    0xE0,0xA0,0xE0,0x00,0x00,0x00,0x00,0x00, 0x50,0x20,0x00,0x00,0x00,0x00,0x08,0x00, // 0xF8, 0xF9
+    0x40,0xA0,0x40,0x00,0x00,0x00,0x00,0x00, 0x50,0x20,0x00,0x00,0x00,0x00,0x08,0x00, // 0xF8, 0xF9 (0xF8) changed the deg symbol
     0x00,0x00,0x00,0x00,0x30,0x00,0x00,0x00, 0x38,0x20,0x20,0x20,0xA0,0xA0,0x60,0x20, // 0xFA, 0xFB
     0x70,0x48,0x48,0x48,0x48,0x00,0x00,0x00, 0x70,0x18,0x30,0x60,0x78,0x00,0x00,0x00, // 0xFC, 0xFD
     0x00,0x00,0x78,0x78,0x78,0x78,0x00,0x00
@@ -210,10 +210,12 @@ void RrdGlcd::clearScreen() {
 }
 
 // render into local screenbuffer
-void RrdGlcd::displayString(const char *ptr, int length) {
+void RrdGlcd::displayString(int row, int col, const char *ptr, int length) {
     for (int i = 0; i < length; ++i) {
-    displayChar(ptr[i]); 			   
-    }	
+        displayChar(row, col, ptr[i]);
+        col+=1;
+    }
+    dirty= true;
 }
 
 void RrdGlcd::renderChar(uint8_t *fb, char c, int ox, int oy) {
@@ -223,17 +225,27 @@ void RrdGlcd::renderChar(uint8_t *fb, char c, int ox, int oy) {
     int i= c*8; // character offset in font array
     int o= ox%8; // where in fb byte does it go
     int a= oy*16 + ox/8; // start address in frame buffer
+    int mask= ~0xF8 >> o; // mask off top bits
+    int mask2= ~0xF8 << (8-o); // mask off bottom bits
     for(int y=0;y<8;y++) {
         int b= font5x8[i+y]; // get font byte
+        fb[a] &= mask; // clear top bits for font
         fb[a] ^= (b>>o); // or in the fonts 1 bits
-        fb[a+1] ^= (b<<(8-o)); // or in the fonts 1 bits
+        if(o >= 4) { // it spans two fb bytes
+            fb[a+1] &= mask2; // clear bottom bits for font
+            fb[a+1] ^= (b<<(8-o)); // or in the fonts 1 bits
+        }
         a+=16; // next line
     }
-        this->gx += 6;
 }
 
-void RrdGlcd::displayChar(char c) {
-    renderChar(this->fb, c, this->gx, this->gy);
+void RrdGlcd::displayChar(int row, int col, char c) {
+    int x= col*6;
+    // if this wraps the line ignore it
+    if(x+6 > WIDTH) return;
+
+    // convert row/column into y and x pixel positions based on font size
+    renderChar(this->fb, c, x, row*8);
 }
 
 void RrdGlcd::renderGlyph(int xp, int yp, const uint8_t *g, int pixelWidth, int pixelHeight) {
@@ -284,39 +296,68 @@ void RrdGlcd::renderGlyph(int xp, int yp, const uint8_t *g, int pixelWidth, int 
         }
     }
 }
-
-void RrdGlcd::pixel(int x, int y, int color) {
+void RrdGlcd::pixel(int x, int y, int color)
+{
     if (y < HEIGHT && x < WIDTH)
-    {
+  {
     unsigned char mask = 0x80 >> (x % 8);
     unsigned char *byte = &fb[y * (WIDTH/8) + (x/8)];
-    if (color == 1) {
-        *byte |= mask;
-    } else if (color == 0) {
-        *byte &= ~mask;
-    } else {
-        *byte ^= mask;
-    }
-    }
+    if ( color == 0 )
+        *byte &= ~mask; // clear pixel
+    else
+        *byte |= mask; // set pixel
+	    // Change the dirty rectangle to account for a pixel being dirty (we assume it was changed)
+    if (startRow > y) { startRow = y; }
+    if (endRow <= y)  { endRow = y + 1; }
+    if (startCol > x) { startCol = x; }
+    if (endCol <= x)  { endCol = x + 1; }
+  }
 }
 
-void RrdGlcd::drawHLine(int x, int y, int w, int color) {
+void RrdGlcd::drawHLine(int x, int y, int w, int color)
+{
     for (int i = 0; i < w; i++) {
 		pixel( x+i,  y,  color);
-    }
-}
+		}
+	}
 
-void RrdGlcd::drawVLine(int x, int y, int h, int color) {
+void RrdGlcd::drawVLine(int x, int y, int h, int color)
+{
     for (int i = 0; i < h; i++) {
 		pixel( x,  y+i,  color);
-    }
-}
+		}
+	}
 void RrdGlcd::drawBox(int x, int y, int w, int h, int color) {
     for (int i = 0; i < w; i++) {
         drawVLine(x + i, y, h, color);
     }
 }
-
+// Draw a line using the Bresenham Algorithm (thanks Wikipedia)
+void RrdGlcd::drawLine(int x0, int y0, int x1, int y1,int color)
+{
+  int dx = (x1 >= x0) ? x1 - x0 : x0 - x1;
+  int dy = (y1 >= y0) ? y1 - y0 : y0 - y1;
+  int sx = (x0 < x1) ? 1 : -1;
+  int sy = (y0 < y1) ? 1 : -1;
+  int err = dx - dy;
+ 
+  for (;;)
+  {
+    pixel(x0, y0, color);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = err + err;
+    if (e2 > -dy)
+    { 
+      err -= dy;
+      x0 += sx;
+    }
+    if (e2 < dx)
+    { 
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
 // copy frame buffer to graphic buffer on display
 void RrdGlcd::fillGDRAM(const uint8_t *bitmap) {
     unsigned char i, y;
